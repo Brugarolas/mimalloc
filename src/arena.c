@@ -482,7 +482,7 @@ static void mi_arena_schedule_purge(mi_arena_t* arena, size_t bitmap_idx, size_t
     // schedule decommit
     mi_msecs_t expire = mi_atomic_loadi64_relaxed(&arena->purge_expire);
     if (expire != 0) {
-      mi_atomic_addi64_acq_rel(&arena->purge_expire, delay/10);  // add smallish extra delay
+      mi_atomic_addi64_acq_rel(&arena->purge_expire, (mi_msecs_t)delay/10);  // add smallish extra delay
     }
     else {
       mi_atomic_storei64_release(&arena->purge_expire, _mi_clock_now() + delay);
@@ -526,7 +526,7 @@ static bool mi_arena_try_purge(mi_arena_t* arena, mi_msecs_t now, bool force, mi
   if (!force && expire > now) return false;
 
   // reset expire (if not already set concurrently)
-  mi_atomic_casi64_strong_acq_rel(&arena->purge_expire, &expire, 0);
+  mi_atomic_casi64_strong_acq_rel(&arena->purge_expire, &expire, (mi_msecs_t)0);
   
   // potential purges scheduled, walk through the bitmap
   bool any_purged = false;
@@ -629,12 +629,12 @@ void _mi_arena_free(void* p, size_t size, size_t committed_size, mi_memid_t memi
     
     // checks
     if (arena == NULL) {
-      _mi_error_message(EINVAL, "trying to free from non-existent arena: %p, size %zu, memid: 0x%zx\n", p, size, memid);
+      _mi_error_message(EINVAL, "trying to free from non-existent arena: %p, size %zu, memid: %p\n", p, size, &memid);
       return;
     }
     mi_assert_internal(arena->field_count > mi_bitmap_index_field(bitmap_idx));
     if (arena->field_count <= mi_bitmap_index_field(bitmap_idx)) {
-      _mi_error_message(EINVAL, "trying to free from non-existent arena block: %p, size %zu, memid: 0x%zx\n", p, size, memid);
+      _mi_error_message(EINVAL, "trying to free from non-existent arena block: %p, size %zu, memid: %p\n", p, size, &memid);
       return;
     }
 

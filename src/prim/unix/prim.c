@@ -283,7 +283,7 @@ static void* mi_unix_mmap(void* addr, size_t size, size_t try_alignment, int pro
         *is_large = true;
         p = mi_unix_mmap_prim(addr, size, try_alignment, protect_flags, lflags, lfd);
         #ifdef MAP_HUGE_1GB
-        if (p == NULL && (lflags & MAP_HUGE_1GB) != 0) {
+        if (p == NULL && (lflags & MAP_HUGE_1GB) == MAP_HUGE_1GB) {
           mi_huge_pages_available = false; // don't try huge 1GiB pages again
           _mi_warning_message("unable to allocate huge (1GiB) page, trying large (2MiB) pages instead (errno: %i)\n", errno);
           lflags = ((lflags & ~MAP_HUGE_1GB) | MAP_HUGE_2MB);
@@ -740,16 +740,40 @@ bool _mi_prim_getenv(const char* name, char* result, size_t result_size) {
 #if defined(MAC_OS_X_VERSION_10_10) && MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_10
 #include <CommonCrypto/CommonCryptoError.h>
 #include <CommonCrypto/CommonRandom.h>
+#elif MAC_OS_X_VERSION_MIN_REQUIRED < 1070
+#include <sys/types.h>
+#include <fcntl.h>
+#include <errno.h>
 #endif
 bool _mi_prim_random_buf(void* buf, size_t buf_len) {
-  #if defined(MAC_OS_X_VERSION_10_15) && MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_15
+  #if defined(MAC_OS_X_VERSION_10_15) && MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_15
     // We prefere CCRandomGenerateBytes as it returns an error code while arc4random_buf
     // may fail silently on macOS. See PR #390, and <https://opensource.apple.com/source/Libc/Libc-1439.40.11/gen/FreeBSD/arc4random.c.auto.html>
     return (CCRandomGenerateBytes(buf, buf_len) == kCCSuccess);
-  #else
+  #elif MAC_OS_X_VERSION_MIN_REQUIRED >= 1070
     // fall back on older macOS
     arc4random_buf(buf, buf_len);
     return true;
+  #else
+    // fall back on even older old Mac OS X
+    int flags = O_RDONLY;
+  #if defined(O_CLOEXEC)
+    flags |= O_CLOEXEC;
+  #endif
+    int fd = mi_prim_open("/dev/urandom", flags);
+    if (fd < 0) return false;
+    size_t count = 0;
+    while(count < buf_len) {
+      ssize_t ret = mi_prim_read(fd, (char*)buf + count, buf_len - count);
+      if (ret<=0) {
+        if (errno!=EAGAIN && errno!=EINTR) break;
+      }
+      else {
+        count += ret;
+      }
+    }
+    mi_prim_close(fd);
+    return (count==buf_len);
   #endif
 }
 
@@ -838,7 +862,7 @@ void _mi_prim_thread_init_auto_done(void) {
 }
 
 void _mi_prim_thread_done_auto_done(void) {
-  // nothing to do
+  pthread_key_delete(_mi_heap_default_key);
 }
 
 void _mi_prim_thread_associate_default_heap(mi_heap_t* heap) {
