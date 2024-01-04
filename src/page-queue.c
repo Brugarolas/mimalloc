@@ -206,7 +206,7 @@ static bool mi_page_queue_is_empty(mi_page_queue_t* queue) {
 static void mi_page_queue_remove(mi_page_queue_t* queue, mi_page_t* page) {
   mi_assert_internal(page != NULL);
   mi_assert_expensive(mi_page_queue_contains(queue, page));
-  mi_assert_internal(page->xblock_size == queue->block_size || (page->xblock_size > MI_MEDIUM_OBJ_SIZE_MAX && mi_page_queue_is_huge(queue))  || (mi_page_is_in_full(page) && mi_page_queue_is_full(queue)));
+  mi_assert_internal(page->xblock_size == queue->block_size || (mi_page_is_huge(page) && mi_page_queue_is_huge(queue))  || (mi_page_is_in_full(page) && mi_page_queue_is_full(queue)));
   mi_heap_t* heap = mi_page_heap(page);
 
   if (page->prev != NULL) page->prev->next = page->next;
@@ -232,9 +232,9 @@ static void mi_page_queue_push(mi_heap_t* heap, mi_page_queue_t* queue, mi_page_
   #if MI_HUGE_PAGE_ABANDON
   mi_assert_internal(_mi_page_segment(page)->kind != MI_SEGMENT_HUGE);
   #endif
-  mi_assert_internal(page->xblock_size == queue->block_size ||
-                      (page->xblock_size > MI_MEDIUM_OBJ_SIZE_MAX) ||
-                        (mi_page_is_in_full(page) && mi_page_queue_is_full(queue)));
+  mi_assert_internal((page->xblock_size == queue->block_size) ||
+                     (mi_page_is_huge(page) && mi_page_queue_is_huge(queue)) || // not: && page->xblock_size > MI_LARGE_OBJ_SIZE_MAX since it could be due to page alignment
+                     (mi_page_is_in_full(page) && mi_page_queue_is_full(queue)) );
 
   mi_page_set_in_full(page, mi_page_queue_is_full(queue));
   // mi_atomic_store_ptr_release(mi_atomic_cast(void*, &page->heap), heap);
@@ -263,8 +263,8 @@ static void mi_page_queue_enqueue_from(mi_page_queue_t* to, mi_page_queue_t* fro
   mi_assert_internal((page->xblock_size == to->block_size && page->xblock_size == from->block_size) ||
                      (page->xblock_size == to->block_size && mi_page_queue_is_full(from)) ||
                      (page->xblock_size == from->block_size && mi_page_queue_is_full(to)) ||
-                     (page->xblock_size > MI_LARGE_OBJ_SIZE_MAX && mi_page_queue_is_huge(to)) ||
-                     (page->xblock_size > MI_LARGE_OBJ_SIZE_MAX && mi_page_queue_is_full(to)));
+                     (mi_page_is_huge(page) && mi_page_queue_is_huge(from)) ||
+                     (mi_page_is_in_full(page) && mi_page_queue_is_full(to)));
 
   mi_heap_t* heap = mi_page_heap(page);
   if (page->prev != NULL) page->prev->next = page->next;

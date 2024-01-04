@@ -28,6 +28,7 @@ typedef struct mi_os_mem_config_s {
   bool    has_overcommit;       // can we reserve more memory than can be actually committed?
   bool    must_free_whole;      // must allocated blocks be freed as a whole (false for mmap, true for VirtualAlloc)
   bool    has_virtual_reserve;  // supports virtual address space reservation? (if true we can reserve virtual address space without using commit or physical memory)
+  bool    has_remap;            // able to remap memory to different virtual addresses? 
 } mi_os_mem_config_t;
 
 // Initialize
@@ -41,9 +42,10 @@ int _mi_prim_free(void* addr, size_t size );
 // If `commit` is false, the virtual memory range only needs to be reserved (with no access) 
 // which will later be committed explicitly using `_mi_prim_commit`.
 // `is_zero` is set to true if the memory was zero initialized (as on most OS's)
+// The `hint` address is either `NULL` or a preferred allocation address but can be ignored.
 // pre: !commit => !allow_large
 //      try_alignment >= _mi_os_page_size() and a power of 2
-int _mi_prim_alloc(size_t size, size_t try_alignment, bool commit, bool allow_large, bool* is_large, bool* is_zero, void** addr);
+int _mi_prim_alloc(void* hint, size_t size, size_t try_alignment, bool commit, bool allow_large, bool* is_large, bool* is_zero, void** addr);
 
 // Commit memory. Returns error code or 0 on success.
 // For example, on Linux this would make the memory PROT_READ|PROT_WRITE.
@@ -68,6 +70,26 @@ int _mi_prim_protect(void* addr, size_t size, bool protect);
 // pre: size > 0  and a multiple of 1GiB.
 //      numa_node is either negative (don't care), or a numa node number.
 int _mi_prim_alloc_huge_os_pages(void* hint_addr, size_t size, int numa_node, bool* is_zero, void** addr);
+
+
+// Reserve a pure virtual address range that can be used with `_mi_prim_remap_to`.
+// Return `EINVAL` if this is not supported.
+// If `is_pinned` is set to `true`, the memory cannot be decommitted or reset.
+// The `remap_info` argument can be used to store OS specific information that is passed to `_mi_prim_remap_to` and `_mi_prim_remap_free`.
+int _mi_prim_remap_reserve(size_t size, bool* is_pinned, void** addr, void** remap_info );
+
+// Remap remappable memory from `addr` to `newaddr` with the new `newsize`. Return `EINVAL` if this is not supported.
+// Both `addr` (if not NULL) and `newaddr` are inside ranges returned from `_mi_prim_remap_reserve`.
+// The `addr` can be NULL to allocate freshly. The `base` pointer is always `<= addr` and if `base != addr`,
+// then it was the pointer returned from `_mi_prim_remap_reserve`. 
+// This is used to ensure we can remap _aligned_ addresses (`addr` and `newaddr`).
+// pre: `newsize > 0`, `size > 0`, `newaddr != NULL`, `extend_zero != NULL`, `remap_info != NULL`.
+int _mi_prim_remap_to(void* base, void* addr, size_t size, void* newaddr, size_t newsize, bool* extend_is_zero, void** remap_info, void** new_remap_info );
+
+// Free remappable memory. Return `EINVAL` if this is not supported.
+// pre: `addr != NULL`
+int _mi_prim_remap_free(void* addr, size_t size, void* remap_info );
+
 
 // Return the current NUMA node
 size_t _mi_prim_numa_node(void);

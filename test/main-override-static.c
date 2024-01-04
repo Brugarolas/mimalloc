@@ -21,10 +21,20 @@ static void alloc_huge(void);
 static void test_heap_walk(void);
 static void test_heap_arena(void);
 static void test_align(void);
+static void test_remap(bool start_remappable);
+static void test_remap2(void);
+static void test_remap3(void);
+static void test_expandable(bool use_realloc);
 
 int main() {
   mi_version();
   mi_stats_reset();
+
+  //test_remap2();
+  //test_remap3();
+  //test_remap(false);
+  test_expandable(true);
+  
   // detect double frees and heap corruption
   // double_free1();
   // double_free2();
@@ -63,7 +73,7 @@ int main() {
   //mi_free(p2);
 
   //mi_collect(true);
-  //mi_stats_print(NULL);
+  mi_stats_print(NULL);
 
   // test_process_info();
   
@@ -241,6 +251,69 @@ static void test_heap_arena(void) {
     }
   }
 }
+
+static void test_remap2(void) {     // By Jason Gibson
+  int* p = (int*)mi_malloc(356);
+  p = (int*)mi_realloc(p, 583);
+  memset(p, '\0', 580);
+  p = (int*)mi_realloc(p, 1500705);
+  p = (int*)mi_realloc(p, 3000711);
+  mi_free(p);
+}
+
+static void test_remap3(void) {    // by Jason Gibson
+  int* x = (int*)mi_malloc(438);
+  x = (int*)mi_realloc(x, 1500705);
+
+  x = (int*)mi_realloc(x, 3000711);
+  x = (int*)mi_realloc(x, 6000723);
+  x = (int*)mi_realloc(x, 10500741);
+  x = (int*)mi_realloc(x, 16500765);
+  x = (int*)mi_realloc(x, 25500801);
+  x = (int*)mi_realloc(x, 39000855);
+  x = (int*)mi_realloc(x, 60000939);
+
+  mi_free(x);
+}
+
+static void test_remap_expand(bool start_remappable, bool start_expandable, bool use_expand) {
+  const size_t iterN = 100;
+  const size_t size0 = 64 * 1024 * 1024;
+  const size_t inc   = 1024 * 1024;
+  const size_t expand_size = size0 + 2 * inc; // (iterN * inc);
+  size_t size = size0;
+  uint8_t* p = (uint8_t*)(start_remappable ? mi_malloc_remappable(size) : (start_expandable ? mi_malloc_expandable(size, expand_size) : mi_malloc(size)));
+  memset(p, 1, size);
+  for (int i = 2; i < iterN; i++) {
+    void* newp = (use_expand ? mi_expand(p, size + inc) : mi_realloc(p, size + inc));
+    if (use_expand && newp != p) {
+      printf("error: could not expand in place: i=%i, size %zu\n", i, size + inc);
+      abort();
+    }
+    p = newp;
+    memset(p + size, i, inc);
+    size += inc;
+    printf("%3d: increased to size %zu\n", i, size);
+  }
+  for (int i = 1; i < iterN; i++) {
+    size_t idx = size0 + ((i - 1) * inc) - 1;
+    uint8_t v = p[idx];
+    if (v != i) {
+      printf("error: corrupted memory in remap: i=%d, index=0x%zx, value=%u \n", i, idx,v);
+      abort();
+    };
+  }
+  mi_free(p);
+}
+
+static void test_remap(bool start_remappable) {
+  test_remap_expand(start_remappable, false, false);
+}
+
+static void test_expandable(bool use_realloc) {
+  test_remap_expand(false, true, !use_realloc);
+}
+
 
 // ----------------------------
 // bin size experiments

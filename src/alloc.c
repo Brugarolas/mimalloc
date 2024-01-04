@@ -24,10 +24,34 @@ terms of the MIT license. A copy of the license can be found in the file
 // Allocation
 // ------------------------------------------------------
 
+#if MI_PADDING
+static void mi_padding_init(mi_page_t* page, mi_block_t* block, size_t size /* block size minus MI_PADDING_SIZE */) {
+  mi_padding_t* const padding = (mi_padding_t*)((uint8_t*)block + mi_page_usable_block_size(page));
+  ptrdiff_t delta = ((uint8_t*)padding - (uint8_t*)block - size);
+  #if (MI_DEBUG>=2)
+    mi_assert_internal(delta >= 0 && mi_page_usable_block_size(page) >= (size + delta));
+  #endif
+  mi_track_mem_defined(padding, sizeof(mi_padding_t));  // note: re-enable since mi_page_usable_block_size may set noaccess
+  padding->canary = (uint32_t)(mi_ptr_encode(page, block, page->keys));
+  padding->delta = (uint32_t)(delta);
+  #if MI_PADDING_CHECK
+  if (!mi_page_is_huge(page)) {
+    uint8_t* fill = (uint8_t*)padding - delta;
+    const size_t maxpad = (delta > MI_MAX_ALIGN_SIZE ? MI_MAX_ALIGN_SIZE : delta); // set at most N initial padding bytes
+    for (size_t i = 0; i < maxpad; i++) { fill[i] = MI_DEBUG_PADDING; }
+  }
+  #endif
+}
+#else
+static void mi_padding_init(mi_page_t* page, mi_block_t* block, size_t size) {
+  MI_UNUSED(page); MI_UNUSED(block); MI_UNUSED(size);
+}
+#endif
+
 // Fast allocation in a page: just pop from the free list.
 // Fall back to generic allocation only if the list is empty.
 extern inline void* _mi_page_malloc(mi_heap_t* heap, mi_page_t* page, size_t size, bool zero) mi_attr_noexcept {
-  mi_assert_internal(page->xblock_size==0||mi_page_block_size(page) >= size);
+  mi_assert_internal(page->xblock_size == 0 || mi_page_block_size(page) >= size);
   mi_block_t* const block = page->free;
   if mi_unlikely(block == NULL) {
     return _mi_malloc_generic(heap, size, zero, 0);
@@ -81,24 +105,7 @@ extern inline void* _mi_page_malloc(mi_heap_t* heap, mi_page_t* page, size_t siz
   }
 #endif
 
-#if MI_PADDING // && !MI_TRACK_ENABLED
-  mi_padding_t* const padding = (mi_padding_t*)((uint8_t*)block + mi_page_usable_block_size(page));
-  ptrdiff_t delta = ((uint8_t*)padding - (uint8_t*)block - (size - MI_PADDING_SIZE));
-  #if (MI_DEBUG>=2)
-  mi_assert_internal(delta >= 0 && mi_page_usable_block_size(page) >= (size - MI_PADDING_SIZE + delta));
-  #endif
-  mi_track_mem_defined(padding,sizeof(mi_padding_t));  // note: re-enable since mi_page_usable_block_size may set noaccess
-  padding->canary = (uint32_t)(mi_ptr_encode(page,block,page->keys));
-  padding->delta  = (uint32_t)(delta);
-  #if MI_PADDING_CHECK
-  if (!mi_page_is_huge(page)) {
-    uint8_t* fill = (uint8_t*)padding - delta;
-    const size_t maxpad = (delta > MI_MAX_ALIGN_SIZE ? MI_MAX_ALIGN_SIZE : delta); // set at most N initial padding bytes
-    for (size_t i = 0; i < maxpad; i++) { fill[i] = MI_DEBUG_PADDING; }
-  }
-  #endif
-#endif
-
+  mi_padding_init(page, block, size - MI_PADDING_SIZE);
   return block;
 }
 
@@ -538,10 +545,9 @@ static inline mi_segment_t* mi_checked_ptr_segment(const void* p, const char* ms
   #else
     {
   #endif
-      _mi_warning_message("%s: pointer might not point to a valid heap region: %p\n"
-        "(this may still be a valid very large allocation (over 64MiB))\n", msg, p);
+      _mi_trace_message("%s: pointer might not point to a valid heap region: %p\n" "(this may still be a valid very large allocation (over 64MiB))\n", msg, p);
       if mi_likely(_mi_ptr_cookie(segment) == segment->cookie) {
-        _mi_warning_message("(yes, the previous pointer %p was valid after all)\n", p);
+        _mi_trace_message("(yes, the previous pointer %p was valid after all)\n", p);
       }
     }
   }
@@ -689,33 +695,78 @@ mi_decl_nodiscard mi_decl_restrict void* mi_mallocn(size_t count, size_t size) m
   return mi_heap_mallocn(mi_prim_get_default_heap(),count,size);
 }
 
+static void* mi_heap_try_expand_zero(mi_heap_t* heap, mi_segment_t* segment, void* p, size_t size, size_t newsize, bool zero);
+
 // Expand (or shrink) in place (or fail)
-void* mi_expand(void* p, size_t newsize) mi_attr_noexcept {
-  #if MI_PADDING
-  // we do not shrink/expand with padding enabled
-  MI_UNUSED(p); MI_UNUSED(newsize);
-  return NULL;
-  #else
+void* mi_expand(void* p, size_t newsize) mi_attr_noexcept 
+{
   if (p == NULL) return NULL;
+  
   const size_t size = _mi_usable_size(p,"mi_expand");
+  if (size == newsize) return p;
+
+  // try OS expand
+  mi_segment_t* const segment = mi_checked_ptr_segment(p, "mi_expand");
+  if mi_unlikely(segment->memid.memkind == MI_MEM_OS_EXPAND) {
+    void* newp = mi_heap_try_expand_zero(mi_prim_get_default_heap(), segment, p, size, newsize, false);
+    mi_assert_internal(newp == NULL || newp == p);
+    if (newp != NULL) return newp;
+  }
+
+  // otherwise we cannot grow inplace
   if (newsize > size) return NULL;
-  return p; // it fits
-  #endif
+
+  // shrink padding
+  mi_page_t* page = _mi_segment_page_of(segment, p);
+  mi_block_t* block = _mi_page_ptr_unalign(segment, page, p);
+  mi_padding_init(page, block, newsize);
+  mi_track_resize(p, size, newsize);
+
+  return p; // it still fits  
+}
+
+
+static void* mi_heap_try_remap_zero(mi_heap_t* heap, mi_segment_t* segment, void* p, size_t size, size_t newsize, bool zero);
+
+static void mi_padding_init_ptr(void* p, size_t size) {
+  mi_segment_t* segment = mi_checked_ptr_segment(p, "_mi_padding_init_ptr");
+  mi_page_t* page = _mi_segment_page_of(segment, p);
+  mi_block_t* block = _mi_page_ptr_unalign(segment, page, p);
+  mi_padding_init(page, block, size);
 }
 
 void* _mi_heap_realloc_zero(mi_heap_t* heap, void* p, size_t newsize, bool zero) mi_attr_noexcept {
   // if p == NULL then behave as malloc.
-  // else if size == 0 then reallocate to a zero-sized block (and don't return NULL, just as mi_malloc(0)).
+  if mi_unlikely(p==NULL) return _mi_heap_malloc_zero(heap,newsize,zero);
+
+  // else if newsize == 0 then reallocate to a zero-sized block (and don't return NULL, just as mi_malloc(0)).
   // (this means that returning NULL always indicates an error, and `p` will not have been freed in that case.)
   const size_t size = _mi_usable_size(p,"mi_realloc"); // also works if p == NULL (with size 0)
-  if mi_unlikely(newsize <= size && newsize >= (size / 2) && newsize > 0) {  // note: newsize must be > 0 or otherwise we return NULL for realloc(NULL,0)
+  if mi_unlikely(newsize <= size && newsize >= (size / 2) && newsize > 0 && newsize < 1024) {  // note: newsize must be > 0 or otherwise we return NULL for realloc(NULL,0)
     mi_assert_internal(p!=NULL);
-    // todo: do not track as the usable size is still the same in the free; adjust potential padding?
-    // mi_track_resize(p,size,newsize)
-    // if (newsize < size) { mi_track_mem_noaccess((uint8_t*)p + newsize, size - newsize); }
+    mi_padding_init_ptr(p, newsize);
+    mi_track_resize(p,size,newsize)
     return p;  // reallocation still fits and not more than 50% waste
   }
-  void* newp = mi_heap_malloc(heap,newsize);
+
+  // try OS expand
+  mi_segment_t* const segment = mi_checked_ptr_segment(p, "mi_realloc");
+  if mi_unlikely(segment->memid.memkind == MI_MEM_OS_EXPAND) {
+    void* newp = mi_heap_try_expand_zero(heap, segment, p, size, newsize, zero);
+    mi_assert_internal(newp == NULL || newp == p);
+    if (newp != NULL) return newp;
+  }
+
+  // try OS remap for large reallocations
+  const size_t remap_threshold = mi_option_get_size(mi_option_remap_threshold);
+  const bool use_remap = (segment->memid.memkind == MI_MEM_OS_REMAP) || (remap_threshold > 0 && newsize >= remap_threshold);
+  if mi_unlikely(use_remap) {
+    void* newp = mi_heap_try_remap_zero(heap, segment, p, size, newsize, zero);
+    if (newp != NULL) return newp;
+  }
+
+  // otherwise copy into a new area
+  void* newp = (use_remap ? mi_heap_malloc_remappable(heap, newsize) : mi_heap_malloc(heap, newsize));
   if mi_likely(newp != NULL) {
     if (zero && newsize > size) {
       // also set last word in the previous allocation to zero to ensure any padding is zero-initialized
@@ -783,6 +834,167 @@ mi_decl_nodiscard void* mi_rezalloc(void* p, size_t newsize) mi_attr_noexcept {
 
 mi_decl_nodiscard void* mi_recalloc(void* p, size_t count, size_t size) mi_attr_noexcept {
   return mi_heap_recalloc(mi_prim_get_default_heap(), p, count, size);
+}
+
+// ------------------------------------------------------
+// expand
+// ------------------------------------------------------
+
+static void* mi_heap_malloc_zero_expandable(mi_heap_t* heap, size_t size, size_t max_expand_size, bool zero) mi_attr_noexcept {
+  if (max_expand_size <= size) { 
+    return _mi_heap_malloc_zero(heap, size, zero);
+  }
+  size_t increments = _mi_divide_up(max_expand_size, MI_EXPAND_INCREMENT);
+  if (increments > MI_ALIGN_EXPAND_MAX) increments = MI_ALIGN_EXPAND_MAX;
+  else if (increments < MI_ALIGN_EXPAND_MIN) increments = MI_ALIGN_EXPAND_MIN;
+  return _mi_heap_malloc_zero_ex(heap, size, zero, increments);
+}
+
+mi_decl_nodiscard void* mi_heap_malloc_expandable(mi_heap_t* heap, size_t size, size_t max_expand_size) mi_attr_noexcept {
+  return mi_heap_malloc_zero_expandable(heap, size, max_expand_size, false);
+}
+
+mi_decl_nodiscard void* mi_heap_zalloc_expandable(mi_heap_t* heap, size_t size, size_t max_expand_size) mi_attr_noexcept {
+  return mi_heap_malloc_zero_expandable(heap, size, max_expand_size, true);
+}
+
+mi_decl_nodiscard void* mi_malloc_expandable(size_t size, size_t max_expand_size) mi_attr_noexcept {
+  return mi_heap_malloc_expandable(mi_prim_get_default_heap(), size, max_expand_size);
+}
+
+mi_decl_nodiscard void* mi_zalloc_expandable(size_t size, size_t max_expand_size) mi_attr_noexcept {
+  return mi_heap_zalloc_expandable(mi_prim_get_default_heap(), size, max_expand_size);
+}
+
+
+static void* mi_heap_try_expand_zero(mi_heap_t* heap, mi_segment_t* segment, void* p, size_t size, size_t newsize, bool zero)
+{
+  if (newsize == 0) return NULL;
+  if (p == NULL) {
+    return mi_heap_malloc_zero_expandable(heap, newsize, zero, (newsize < PTRDIFF_MAX/2 ? 2*newsize : newsize));
+  }
+
+  // expandable memory?
+  if (segment->memid.memkind != MI_MEM_OS_EXPAND) return NULL;
+
+  // we can only expand from an owning thread (as the segment is modified temporarily)
+  const mi_threadid_t tid = _mi_prim_thread_id();
+  mi_assert(heap->thread_id == tid);
+  if (segment->thread_id != tid) return NULL;
+
+  // check size
+  const size_t padsize = newsize + MI_PADDING_SIZE;
+  mi_assert_internal(segment != NULL);
+  mi_page_t* page = _mi_segment_page_of(segment, p);
+  mi_block_t* block = _mi_page_ptr_unalign(segment, page, p);
+  
+  // try to use OS expand
+  mi_assert_internal((void*)block == p);
+  block = _mi_segment_huge_page_expand(segment, page, block, padsize, &heap->tld->segments);
+  mi_assert_internal(block == NULL || (void*)block == p);
+  if (block == NULL) return NULL;
+  
+  _mi_trace_message("expanded inplace (address: %p to %zu bytes)\n", p, newsize);
+  mi_padding_init(page, block, newsize);
+  mi_track_resize(p, size, newsize);
+  if (zero) {
+    // also set last word in the previous allocation to zero to ensure any padding is zero-initialized
+    const size_t start = (size >= sizeof(intptr_t) ? size - sizeof(intptr_t) : 0);
+    _mi_memzero((uint8_t*)p + start, newsize - start);
+  }
+  return block;
+}
+
+
+// ------------------------------------------------------
+// remap
+// ------------------------------------------------------
+
+static void* mi_heap_malloc_zero_remappable(mi_heap_t* heap, size_t size, bool zero) mi_attr_noexcept {
+  return _mi_heap_malloc_zero_ex(heap, size, zero, MI_ALIGN_REMAP);
+}
+
+mi_decl_nodiscard void* mi_heap_malloc_remappable(mi_heap_t* heap, size_t size) mi_attr_noexcept {
+  return mi_heap_malloc_zero_remappable(heap, size, false);
+}
+
+mi_decl_nodiscard void* mi_heap_zalloc_remappable(mi_heap_t* heap, size_t size) mi_attr_noexcept {
+  return mi_heap_malloc_zero_remappable(heap, size, true);
+}
+
+mi_decl_nodiscard void* mi_malloc_remappable(size_t size) mi_attr_noexcept {
+  return mi_heap_malloc_remappable(mi_prim_get_default_heap(), size);
+}
+
+mi_decl_nodiscard void* mi_zalloc_remappable(size_t size) mi_attr_noexcept {
+  return mi_heap_zalloc_remappable(mi_prim_get_default_heap(), size);
+}
+
+// remap is as realloc but issues warnings if the memory is not remappable
+mi_decl_nodiscard void* mi_remap(void* p, size_t newsize) mi_attr_noexcept 
+{
+  mi_heap_t* const heap = mi_prim_get_default_heap();
+  mi_segment_t* const segment = mi_checked_ptr_segment(p, "mi_remap");
+  const mi_threadid_t tid = _mi_prim_thread_id();
+  mi_assert(heap->thread_id == tid);
+  if (segment->thread_id != tid) {
+    _mi_warning_message("cannot remap memory from a different thread (address: %p, newsize: %zu bytes)\n", p, newsize);
+  }
+  else if (segment->memid.memkind != MI_MEM_OS_REMAP) {
+    _mi_warning_message("cannot remap non-remappable memory (address: %p, newsize: %zu bytes)\n", p, newsize);
+  }
+  return _mi_heap_realloc_zero(heap, p, newsize, false);
+}
+
+// called from `mi_realloc`
+static void* mi_heap_try_remap_zero(mi_heap_t* heap, mi_segment_t* segment, void* p, size_t size, size_t newsize, bool zero)
+{
+  if (newsize == 0) return NULL;
+  if (p == NULL) {
+    return mi_heap_malloc_zero_remappable(heap, newsize, zero);
+  }
+
+  // we can only remap from an owning thread
+  const mi_threadid_t tid = _mi_prim_thread_id();
+  mi_assert(heap->thread_id == tid);
+  if (segment->thread_id != tid) return NULL;
+
+  // remappable memory?
+  if (segment->memid.memkind != MI_MEM_OS_REMAP) return NULL;
+
+  // check size
+  const size_t padsize = newsize + MI_PADDING_SIZE;
+  mi_assert_internal(segment != NULL);
+  mi_page_t* page = _mi_segment_page_of(segment, p);  
+  mi_block_t* block = _mi_page_ptr_unalign(segment, page, p);
+  const size_t bsize = mi_page_usable_block_size(page);
+  if (bsize >= padsize && 9*(bsize/10) <= padsize) {  // if smaller and not more than 10% waste, keep it
+    _mi_verbose_message("remapping in the same block (address: %p from %zu bytes to %zu bytes)\n", p, mi_usable_size(p), newsize);
+    mi_padding_init(page, block, newsize);
+    mi_track_resize(p, size, newsize);
+    return p;
+  }
+
+  // try to use OS remap
+  mi_assert_internal((void*)block == p);        
+  block = _mi_segment_huge_page_remap(segment, page, block, padsize, &heap->tld->segments);
+  if (block != NULL) {     
+    // succes! re-establish the pointers to the potentially relocated memory
+    _mi_trace_message("used remap (address: %p to %zu bytes)\n", p, newsize);
+    segment = mi_checked_ptr_segment(block, "mi_remap");
+    page = _mi_segment_page_of(segment, block);
+    mi_padding_init(page, block, newsize);
+    mi_track_realloc(p, size, block, newsize);
+    if (zero) {
+      // also set last word in the previous allocation to zero to ensure any padding is zero-initialized
+      const size_t start = (size >= sizeof(intptr_t) ? size - sizeof(intptr_t) : 0);
+      _mi_memzero((uint8_t*)p + start, newsize - start);
+    }
+    return block;
+  }
+  
+  _mi_warning_message("unable to remap memory, fall back to reallocation (address: %p, from %zu bytes to %zu bytes)\n", p, mi_usable_size(p), newsize);
+  return NULL;
 }
 
 

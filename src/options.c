@@ -1,5 +1,5 @@
 /* ----------------------------------------------------------------------------
-Copyright (c) 2018-2021, Microsoft Research, Daan Leijen
+Copyright (c) 2018-2023, Microsoft Research, Daan Leijen
 This is free software; you can redistribute it and/or modify it under the
 terms of the MIT license. A copy of the license can be found in the file
 "LICENSE" at the root of this distribution.
@@ -90,12 +90,14 @@ static mi_option_desc_t options[_mi_option_last] =
   #endif
   { 10,  UNINIT, MI_OPTION(arena_purge_mult) },        // purge delay multiplier for arena's
   { 1,   UNINIT, MI_OPTION_LEGACY(purge_extend_delay, decommit_extend_delay) },
+  { 1024,UNINIT, MI_OPTION(remap_threshold) },         // size in KiB after which realloc starts using OS remap (0 to disable auto remap)
 };
+
 
 static void mi_option_init(mi_option_desc_t* desc);
 
 static bool mi_option_has_size_in_kib(mi_option_t option) {
-  return (option == mi_option_reserve_os_memory || option == mi_option_arena_reserve);
+  return (option == mi_option_reserve_os_memory || option == mi_option_arena_reserve || option == mi_option_remap_threshold);
 }
 
 void _mi_options_init(void) {
@@ -477,7 +479,7 @@ static void mi_option_init(mi_option_desc_t* desc) {
     else {
       char* end = buf;
       long value = strtol(buf, &end, 10);
-      if (desc->option == mi_option_reserve_os_memory || desc->option == mi_option_arena_reserve) {
+      if (mi_option_has_size_in_kib(desc->option)) {
         // this option is interpreted in KiB to prevent overflow of `long`
         if (*end == 'K') { end++; }
         else if (*end == 'M') { value *= MI_KiB; end++; }
