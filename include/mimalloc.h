@@ -8,7 +8,7 @@ terms of the MIT license. A copy of the license can be found in the file
 #ifndef MIMALLOC_H
 #define MIMALLOC_H
 
-#define MI_MALLOC_VERSION 182   // major + 2 digits minor
+#define MI_MALLOC_VERSION 212   // major + 2 digits minor
 
 // ------------------------------------------------------
 // Compiler specific attributes
@@ -97,6 +97,7 @@ terms of the MIT license. A copy of the license can be found in the file
 
 #include <stddef.h>     // size_t
 #include <stdbool.h>    // bool
+#include <stdint.h>     // INTPTR_MAX
 
 #ifdef __cplusplus
 extern "C" {
@@ -299,6 +300,8 @@ mi_decl_export int mi_reserve_huge_os_pages_at(size_t pages, int numa_node, size
 
 mi_decl_export int  mi_reserve_os_memory(size_t size, bool commit, bool allow_large) mi_attr_noexcept;
 mi_decl_export bool mi_manage_os_memory(void* start, size_t size, bool is_committed, bool is_large, bool is_zero, int numa_node) mi_attr_noexcept;
+
+mi_decl_export void mi_debug_show_arenas(void) mi_attr_noexcept;
 
 // Experimental: heaps associated with specific memory arena's
 typedef int mi_arena_id_t;

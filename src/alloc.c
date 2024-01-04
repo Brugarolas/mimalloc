@@ -95,7 +95,7 @@ extern inline void* _mi_page_malloc(mi_heap_t* heap, mi_page_t* page, size_t siz
 
 #if (MI_STAT>0)
   const size_t bsize = mi_page_usable_block_size(page);
-  if (bsize <= MI_LARGE_OBJ_SIZE_MAX) {
+  if (bsize <= MI_MEDIUM_OBJ_SIZE_MAX) {
     mi_heap_stat_increase(heap, normal, bsize);
     mi_heap_stat_counter_increase(heap, normal_count, 1);
 #if (MI_STAT>1)
@@ -353,32 +353,27 @@ static void mi_check_padding(const mi_page_t* page, const mi_block_t* block) {
 // only maintain stats for smaller objects if requested
 #if (MI_STAT>0)
 static void mi_stat_free(const mi_page_t* page, const mi_block_t* block) {
-#if (MI_STAT < 2)
+  #if (MI_STAT < 2)  
   MI_UNUSED(block);
-#endif
+  #endif
   mi_heap_t* const heap = mi_heap_get_default();
   const size_t bsize = mi_page_usable_block_size(page);
-#if (MI_STAT>1)
+  #if (MI_STAT>1)
   const size_t usize = mi_page_usable_size_of(page, block);
   mi_heap_stat_decrease(heap, malloc, usize);
-#endif
-  if (bsize <= MI_LARGE_OBJ_SIZE_MAX) {
+  #endif  
+  if (bsize <= MI_MEDIUM_OBJ_SIZE_MAX) {
     mi_heap_stat_decrease(heap, normal, bsize);
-#if (MI_STAT > 1)
+    #if (MI_STAT > 1)
     mi_heap_stat_decrease(heap, normal_bins[_mi_bin(bsize)], 1);
-#endif
+    #endif
   }
-#if !MI_HUGE_PAGE_ABANDON
+  else if (bsize <= MI_LARGE_OBJ_SIZE_MAX) {
+    mi_heap_stat_decrease(heap, large, bsize);
+  }
   else {
-    const size_t bpsize = mi_page_block_size(page);
-    if (bpsize <= MI_HUGE_OBJ_SIZE_MAX) {
-      mi_heap_stat_decrease(heap, huge, bpsize);
-    }
-    else {
-      mi_heap_stat_decrease(heap, giant, bpsize);
-    }
-  }
-#endif
+    mi_heap_stat_decrease(heap, huge, bsize);
+  }  
 }
 #else
 static void mi_stat_free(const mi_page_t* page, const mi_block_t* block) {
@@ -392,11 +387,11 @@ static void mi_stat_free(const mi_page_t* page, const mi_block_t* block) {
 static void mi_stat_huge_free(const mi_page_t* page) {
   mi_heap_t* const heap = mi_heap_get_default();
   const size_t bsize = mi_page_block_size(page); // to match stats in `page.c:mi_page_huge_alloc`
-  if (bsize <= MI_HUGE_OBJ_SIZE_MAX) {
-    mi_heap_stat_decrease(heap, huge, bsize);
+  if (bsize <= MI_LARGE_OBJ_SIZE_MAX) {
+    mi_heap_stat_decrease(heap, large, bsize);
   }
   else {
-    mi_heap_stat_decrease(heap, giant, bsize);
+    mi_heap_stat_decrease(heap, huge, bsize);
   }
 }
 #else
@@ -417,9 +412,10 @@ static mi_decl_noinline void _mi_free_block_mt(mi_page_t* page, mi_block_t* bloc
   // that is safe as these are constant and the page won't be freed (as the block is not freed yet).
   mi_check_padding(page, block);
   _mi_padding_shrink(page, block, sizeof(mi_block_t));       // for small size, ensure we can fit the delayed thread pointers without triggering overflow detection
-
-  mi_segment_t* const segment = _mi_page_segment(page);
-  if (segment->page_kind == MI_PAGE_HUGE) {
+  
+  // huge page segments are always abandoned and can be freed immediately
+  mi_segment_t* segment = _mi_page_segment(page);
+  if (segment->kind == MI_SEGMENT_HUGE) {
     #if MI_HUGE_PAGE_ABANDON
     // huge page segments are always abandoned and can be freed immediately
     mi_stat_huge_free(page);
@@ -432,10 +428,11 @@ static mi_decl_noinline void _mi_free_block_mt(mi_page_t* page, mi_block_t* bloc
     _mi_segment_huge_page_reset(segment, page, block);
     #endif
   }
-
-
-  #if (MI_DEBUG>0) && !MI_TRACK_ENABLED  && !MI_TSAN       // note: when tracking, cannot use mi_usable_size with multi-threading
-  memset(block, MI_DEBUG_FREED, mi_usable_size(block));
+  
+  #if (MI_DEBUG>0) && !MI_TRACK_ENABLED && !MI_TSAN        // note: when tracking, cannot use mi_usable_size with multi-threading
+  if (segment->kind != MI_SEGMENT_HUGE) {                  // not for huge segments as we just reset the content
+    memset(block, MI_DEBUG_FREED, mi_usable_size(block));
+  }
   #endif
 
   // Try to put the block on either the page-local thread free list, or the heap delayed free list.
@@ -486,8 +483,10 @@ static inline void _mi_free_block(mi_page_t* page, bool local, mi_block_t* block
     // owning thread can free a block directly
     if mi_unlikely(mi_check_is_double_free(page, block)) return;
     mi_check_padding(page, block);
-    #if (MI_DEBUG>0) && !MI_TRACK_ENABLED  && !MI_TSAN
-    memset(block, MI_DEBUG_FREED, mi_page_block_size(page));
+    #if (MI_DEBUG>0) && !MI_TRACK_ENABLED && !MI_TSAN
+    if (!mi_page_is_huge(page)) {   // huge page content may be already decommitted
+      memset(block, MI_DEBUG_FREED, mi_page_block_size(page));
+    }
     #endif
     mi_block_set_next(page, block, page->local_free);
     page->local_free = block;
@@ -541,9 +540,15 @@ static inline mi_segment_t* mi_checked_ptr_segment(const void* p, const char* ms
 
 #if (MI_DEBUG>0)
   if mi_unlikely(!mi_is_in_heap_region(p)) {
-    _mi_trace_message("%s: pointer might not point to a valid heap region: %p\n" "(this may still be a valid very large allocation (over 64MiB))\n", msg, p);
-    if mi_likely(_mi_ptr_cookie(segment) == segment->cookie) {
-      _mi_trace_message("(yes, the previous pointer %p was valid after all)\n", p);
+  #if (MI_INTPTR_SIZE == 8 && defined(__linux__))
+    if (((uintptr_t)p >> 40) != 0x7F) { // linux tends to align large blocks above 0x7F000000000 (issue #640)
+  #else
+    {
+  #endif
+      _mi_trace_message("%s: pointer might not point to a valid heap region: %p\n" "(this may still be a valid very large allocation (over 64MiB))\n", msg, p);
+      if mi_likely(_mi_ptr_cookie(segment) == segment->cookie) {
+        _mi_trace_message("(yes, the previous pointer %p was valid after all)\n", p);
+      }
     }
   }
 #endif
@@ -1260,7 +1265,7 @@ void* _mi_externs[] = {
   (void*)&mi_zalloc_small,
   (void*)&mi_heap_malloc,
   (void*)&mi_heap_zalloc,
-  (void*)&mi_heap_malloc_small
+  (void*)&mi_heap_malloc_small,
   // (void*)&mi_heap_alloc_new,
   // (void*)&mi_heap_alloc_new_n
 };

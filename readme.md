@@ -76,7 +76,7 @@ Enjoy!
 
 ### Releases
 
-Note: the `v2.x` version has a new algorithm for managing internal mimalloc pages that tends to use reduce memory usage
+Note: the `v2.x` version has a new algorithm for managing internal mimalloc pages that tends to reduce memory usage
   and fragmentation compared to mimalloc `v1.x` (especially for large workloads). Should otherwise have similar performance
   (see [below](#performance)); please report if you observe any significant performance regression.
 
@@ -93,8 +93,7 @@ Note: the `v2.x` version has a new algorithm for managing internal mimalloc page
 * 2022-12-23, `v1.7.9`, `v2.0.9`: Supports building with [asan](#asan) and improved [Valgrind](#valgrind) support.
   Support abitrary large alignments (in particular for `std::pmr` pools). 
   Added C++ STL allocators attached to a specific heap (thanks @vmarkovtsev). 
-  Heap walks now visit all object (including huge objects). Support Windows nano server containers (by Johannes Schindelin,@dscho). 
-  Various small bug fixes.
+  Heap walks now visit all object (including huge objects). Support Windows nano server containers (by Johannes Schindelin,@dscho). Various small bug fixes.
 
 * 2022-11-03, `v1.7.7`, `v2.0.7`: Initial support for [Valgrind](#valgrind) for leak testing and heap block overflow
   detection. Initial
