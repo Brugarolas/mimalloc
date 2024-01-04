@@ -27,6 +27,7 @@ we therefore test the API over various inputs. Please add more tests :-)
 #include <stdbool.h>
 #include <stdint.h>
 #include <errno.h>
+#include <string.h>
 
 #ifdef __cplusplus
 #include <vector>
@@ -59,6 +60,7 @@ bool mem_is_zero(uint8_t* p, size_t size) {
 // ---------------------------------------------------------------------------
 int main(void) {
   mi_option_disable(mi_option_verbose);
+  mi_option_set(mi_option_remap_threshold, 100 /* in kib */);
   
   // ---------------------------------------------------
   // Malloc
@@ -154,7 +156,7 @@ int main(void) {
   };
   CHECK_BODY("malloc-aligned6") {
     bool ok = true;
-    for (size_t align = 1; align <= MI_ALIGNMENT_MAX && ok; align *= 2) {
+    for (size_t align = 1; align <= MI_ALIGN_HUGE && ok; align *= 2) {
       void* ps[8];
       for (int i = 0; i < 8 && ok; i++) {
         ps[i] = mi_malloc_aligned(align*13  // size
@@ -170,16 +172,16 @@ int main(void) {
     result = ok;
   };
   CHECK_BODY("malloc-aligned7") {
-    void* p = mi_malloc_aligned(1024,MI_ALIGNMENT_MAX);
+    void* p = mi_malloc_aligned(1024,MI_ALIGN_HUGE);
     mi_free(p);
-    result = ((uintptr_t)p % MI_ALIGNMENT_MAX) == 0;
+    result = ((uintptr_t)p % MI_ALIGN_HUGE) == 0;
   };
   CHECK_BODY("malloc-aligned8") {
     bool ok = true;
     for (int i = 0; i < 5 && ok; i++) {
       int n = (1 << i);
-      void* p = mi_malloc_aligned(1024, n * MI_ALIGNMENT_MAX);
-      ok = ((uintptr_t)p % (n*MI_ALIGNMENT_MAX)) == 0;
+      void* p = mi_malloc_aligned(1024, n * MI_ALIGN_HUGE);
+      ok = ((uintptr_t)p % (n*MI_ALIGN_HUGE)) == 0;
       mi_free(p);
     }
     result = ok;
@@ -187,7 +189,7 @@ int main(void) {
   CHECK_BODY("malloc-aligned9") {
     bool ok = true;
     void* p[8];
-    size_t sizes[8] = { 8, 512, 1024 * 1024, MI_ALIGNMENT_MAX, MI_ALIGNMENT_MAX + 1, 2 * MI_ALIGNMENT_MAX, 8 * MI_ALIGNMENT_MAX, 0 };
+    size_t sizes[8] = { 8, 512, 1024 * 1024, MI_ALIGN_HUGE, MI_ALIGN_HUGE + 1, 2 * MI_ALIGN_HUGE, 8 * MI_ALIGN_HUGE, 0 };
     for (int i = 0; i < 28 && ok; i++) {
       int align = (1 << i);
       for (int j = 0; j < 8 && ok; j++) {
@@ -281,6 +283,15 @@ int main(void) {
   CHECK_BODY("reallocarray-null-sizezero") {
     void* p = mi_reallocarray(NULL,0,16);  // issue #574
     result = (p != NULL && errno == 0);
+    mi_free(p);
+  };
+
+  CHECK_BODY("reallo-huge") {          // By Jason Gibson
+    int* p = (int*)mi_malloc(356);
+    p = (int*)mi_realloc(p, 583);
+    memset(p, '\0', 580);
+    p = (int*)mi_realloc(p, 1500705);
+    p = (int*)mi_realloc(p, 3000711);
     mi_free(p);
   };
 

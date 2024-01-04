@@ -115,6 +115,13 @@ size_t     _mi_os_large_page_size(void);
 
 void*      _mi_os_alloc_huge_os_pages(size_t pages, int numa_node, mi_msecs_t max_secs, size_t* pages_reserved, size_t* psize, mi_memid_t* memid);
 
+void*      _mi_os_alloc_remappable(size_t size, size_t alignment, mi_memid_t* memid, mi_stats_t* stats);
+void*      _mi_os_remap(void* p, size_t size, size_t newsize, mi_memid_t* memid, mi_stats_t* stats);
+
+void*      _mi_os_alloc_expandable(size_t size, size_t alignment, size_t future_reserve, mi_memid_t* memid, mi_stats_t* stats);
+bool       _mi_os_expand(void* p, size_t size, size_t newsize, mi_memid_t* memid, mi_stats_t* stats);
+
+
 // arena.c
 mi_arena_id_t _mi_arena_id_none(void);
 void       _mi_arena_free(void* p, size_t size, size_t still_committed_size, mi_memid_t memid, mi_stats_t* stats);
@@ -147,6 +154,9 @@ void       _mi_abandoned_reclaim_all(mi_heap_t* heap, mi_segments_tld_t* tld);
 void       _mi_abandoned_await_readers(void);
 void       _mi_abandoned_collect(mi_heap_t* heap, bool force, mi_segments_tld_t* tld);
 
+mi_block_t* _mi_segment_huge_page_remap(mi_segment_t* segment, mi_page_t* page, mi_block_t* block, size_t newsize, mi_segments_tld_t* tld);
+mi_block_t* _mi_segment_huge_page_expand(mi_segment_t* segment, mi_page_t* page, mi_block_t* block, size_t newsize, mi_segments_tld_t* tld);
+
 // "page.c"
 void*      _mi_malloc_generic(mi_heap_t* heap, size_t size, bool zero, size_t huge_alignment)  mi_attr_noexcept mi_attr_malloc;
 
@@ -168,6 +178,9 @@ void       _mi_page_reclaim(mi_heap_t* heap, mi_page_t* page);   // callback fro
 
 size_t     _mi_bin_size(uint8_t bin);           // for stats
 uint8_t    _mi_bin(size_t size);                // for stats
+
+void       _mi_heap_huge_page_attach(mi_heap_t* heap, mi_page_t* page);
+void       _mi_heap_huge_page_detach(mi_heap_t* heap, mi_page_t* page);
 
 // "heap.c"
 void       _mi_heap_destroy_pages(mi_heap_t* heap);
@@ -192,14 +205,17 @@ bool        _mi_free_delayed_block(mi_block_t* block);
 void        _mi_free_generic(const mi_segment_t* segment, mi_page_t* page, bool is_local, void* p) mi_attr_noexcept;  // for runtime integration
 void        _mi_padding_shrink(const mi_page_t* page, const mi_block_t* block, const size_t min_size);
 
-// option.c, c primitives
+// "libc.c"
+#include    <stdarg.h>
+void        _mi_vsnprintf(char* buf, size_t bufsize, const char* fmt, va_list args);
+void        _mi_snprintf(char* buf, size_t buflen, const char* fmt, ...);
 char        _mi_toupper(char c);
 int         _mi_strnicmp(const char* s, const char* t, size_t n);
 void        _mi_strlcpy(char* dest, const char* src, size_t dest_size);
 void        _mi_strlcat(char* dest, const char* src, size_t dest_size);
 size_t      _mi_strlen(const char* s);
 size_t      _mi_strnlen(const char* s, size_t max_len);
-
+bool        _mi_getenv(const char* name, char* result, size_t result_size);
 
 #if MI_DEBUG>1
 bool        _mi_page_is_valid(mi_page_t* page);
@@ -306,6 +322,10 @@ static inline uintptr_t _mi_align_down(uintptr_t sz, size_t alignment) {
   else {
     return ((sz / alignment) * alignment);
   }
+
+// Align upwards for a pointer
+static inline void* _mi_align_up_ptr(void* p, size_t alignment) {
+  return (void*)_mi_align_up((uintptr_t)p, alignment);
 }
 
 // Divide upwards: `s <= _mi_divide_up(s,d)*d < s+d`.
@@ -461,22 +481,30 @@ static inline mi_page_t* _mi_ptr_page(void* p) {
   return _mi_segment_page_of(_mi_ptr_segment(p), p);
 }
 
+static inline bool mi_segment_is_huge(const mi_segment_t* segment) {
+  return (segment->page_kind == MI_PAGE_HUGE);
+}
+
+static inline bool mi_page_is_huge(const mi_page_t* page) {
+  bool huge = mi_segment_is_huge(_mi_page_segment(page));
+  mi_assert_internal((huge && page->xblock_size == MI_HUGE_BLOCK_SIZE) || (!huge && page->xblock_size <= MI_LARGE_OBJ_SIZE_MAX));
+  return huge;
+}
+
 // Get the block size of a page (special case for huge objects)
 static inline size_t mi_page_block_size(const mi_page_t* page) {
   const size_t bsize = page->xblock_size;
   mi_assert_internal(bsize > 0);
   if mi_likely(bsize < MI_HUGE_BLOCK_SIZE) {
+    mi_assert_internal(bsize <= MI_LARGE_OBJ_SIZE_MAX);
     return bsize;
   }
   else {
+    mi_assert_internal(mi_page_is_huge(page));
     size_t psize;
     _mi_segment_page_start(_mi_page_segment(page), page, &psize);
     return psize;
   }
-}
-
-static inline bool mi_page_is_huge(const mi_page_t* page) {
-  return (_mi_page_segment(page)->kind == MI_SEGMENT_HUGE);
 }
 
 // Get the usable block size of a page without fixed padding.
@@ -749,11 +777,14 @@ static inline mi_memid_t _mi_memid_none(void) {
   return _mi_memid_create(MI_MEM_NONE);
 }
 
-static inline mi_memid_t _mi_memid_create_os(bool committed, bool is_zero, bool is_large) {
+static inline mi_memid_t _mi_memid_create_os(void* base, size_t size, size_t alignment, bool committed, bool is_large_or_pinned, bool is_zero ) {
   mi_memid_t memid = _mi_memid_create(MI_MEM_OS);
+  memid.mem.os.base = base;
+  memid.mem.os.size = size;
+  memid.mem.os.alignment = alignment;
   memid.initially_committed = committed;
   memid.initially_zero = is_zero;
-  memid.is_pinned = is_large;
+  memid.is_pinned = is_large_or_pinned;
   return memid;
 }
 

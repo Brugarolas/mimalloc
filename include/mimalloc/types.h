@@ -204,6 +204,17 @@ typedef int32_t  mi_ssize_t;
 // Alignments over MI_ALIGNMENT_MAX are allocated in dedicated huge page segments 
 #define MI_ALIGNMENT_MAX                  (MI_SEGMENT_SIZE >> 1)  
 
+// TODO Merge this two codes, they are for the same stuff
+
+// Alignments over MI_ALIGNMENT_MAX are allocated in dedicated huge page segments
+#define MI_ALIGN_HUGE        (MI_SEGMENT_SIZE >> 1)
+
+// We use special alignments internally to allocate remappable and expandable memory
+#define MI_ALIGN_REMAP       (MI_ALIGN_HUGE - 1)
+#define MI_ALIGN_EXPAND_MAX  (MI_ALIGN_HUGE - 2)
+#define MI_ALIGN_EXPAND_MIN  (1)
+#define MI_EXPAND_INCREMENT  (MI_MiB)
+
 
 // ------------------------------------------------------
 // Mimalloc pages contain allocated blocks
@@ -378,6 +389,7 @@ typedef enum mi_memkind_e {
   MI_MEM_STATIC,    // allocated in a static area and should not be freed (for arena meta data for example)
   MI_MEM_OS,        // allocated from the OS
   MI_MEM_OS_HUGE,   // allocated as huge os pages
+  MI_MEM_OS_EXPAND, // allocated in an expandable area
   MI_MEM_OS_REMAP,  // allocated in a remapable area (i.e. using `mremap`)
   MI_MEM_ARENA      // allocated from an arena (the usual case)
 } mi_memkind_t;
@@ -388,7 +400,9 @@ static inline bool mi_memkind_is_os(mi_memkind_t memkind) {
 
 typedef struct mi_memid_os_info {
   void*         base;               // actual base address of the block (used for offset aligned allocations)
-  size_t        alignment;          // alignment at allocation
+  size_t        size;               // allocated size (the full extent from base)
+  size_t        alignment;          // requested alignment at allocation (may be offset aligned, so base may not be aligned at this value)
+  void*         prim_info;          // potential OS dependent information (used for remappable memory on Windows)
 } mi_memid_os_info_t;
 
 typedef struct mi_memid_arena_info {

@@ -22,6 +22,7 @@ void _mi_prim_mem_init( mi_os_mem_config_t* config ) {
   config->has_overcommit = false;  
   config->must_free_whole = true;
   config->has_virtual_reserve = false;
+  config->has_remap = false;
 }
 
 //---------------------------------------------
@@ -115,8 +116,8 @@ static void* mi_prim_mem_grow(size_t size, size_t try_alignment) {
 }
 
 // Note: the `try_alignment` is just a hint and the returned pointer is not guaranteed to be aligned.
-int _mi_prim_alloc(size_t size, size_t try_alignment, bool commit, bool allow_large, bool* is_large, bool* is_zero, void** addr) {
-  MI_UNUSED(allow_large); MI_UNUSED(commit);
+int _mi_prim_alloc(void* hint, size_t size, size_t try_alignment, bool commit, bool allow_large, bool* is_large, bool* is_zero, void** addr) {
+  MI_UNUSED(hint); MI_UNUSED(allow_large); MI_UNUSED(commit);
   *is_large = false;
   *is_zero = false;
   *addr = mi_prim_mem_grow(size, try_alignment);
@@ -272,4 +273,24 @@ void _mi_prim_thread_done_auto_done(void) {
 
 void _mi_prim_thread_associate_default_heap(mi_heap_t* heap) {
   MI_UNUSED(heap);
+}
+
+
+//----------------------------------------------------------------
+// Remappable memory
+//----------------------------------------------------------------
+
+int _mi_prim_remap_reserve(size_t size, bool* is_pinned, void** base, void** remap_info) {
+  MI_UNUSED(size); MI_UNUSED(is_pinned); MI_UNUSED(base); MI_UNUSED(remap_info);
+  return EINVAL;
+}
+
+int _mi_prim_remap_to(void* base, void* addr, size_t size, void* newaddr, size_t newsize, bool* extend_is_zero, void** remap_info, void** new_remap_info) {
+  MI_UNUSED(base); MI_UNUSED(addr); MI_UNUSED(size); MI_UNUSED(newaddr); MI_UNUSED(newsize); MI_UNUSED(extend_is_zero); MI_UNUSED(remap_info); MI_UNUSED(new_remap_info);
+  return EINVAL;
+}
+
+int _mi_prim_remap_free(void* base, size_t size, void* remap_info) {
+  MI_UNUSED(base); MI_UNUSED(size); MI_UNUSED(remap_info);
+  return EINVAL;
 }

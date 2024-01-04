@@ -244,6 +244,32 @@ mi_decl_nodiscard mi_decl_export void* mi_heap_recalloc_aligned_at(mi_heap_t* he
 
 
 // ------------------------------------------------------
+// Remappable memory (uses `mremap` if possible).
+// `mi_realloc` will use `mi_remap` internally for blocks allocated as remappable,
+// and starts allocating remappable memory for any block larger than `mi_option_remap_threshold` (1MiB).
+// Supported on Linux and Windows, and usually works well on systems with just `mmap` (macOS)
+// ------------------------------------------------------
+
+mi_decl_nodiscard mi_decl_export void* mi_malloc_remappable(size_t size) mi_attr_noexcept mi_attr_alloc_size(1);
+mi_decl_nodiscard mi_decl_export void* mi_zalloc_remappable(size_t size) mi_attr_noexcept mi_attr_alloc_size(1);
+mi_decl_nodiscard mi_decl_export void* mi_heap_malloc_remappable(mi_heap_t* heap, size_t size) mi_attr_noexcept mi_attr_alloc_size(2);
+mi_decl_nodiscard mi_decl_export void* mi_heap_zalloc_remappable(mi_heap_t* heap, size_t size) mi_attr_noexcept mi_attr_alloc_size(2);
+
+// mi_decl_nodiscard mi_decl_export void* mi_remap(void* p, size_t newsize) mi_attr_noexcept mi_attr_alloc_size(2);
+
+// ------------------------------------------------------
+// Expandable memory reserves a virtual address range of `max_expand_size` (capped at 1TiB)
+// and commits this on-demand through `mi_realloc` and `mi_expand`. Both of those will 
+// expand inplace for blocks allocated as expandable up to `max_expand_size`.
+// ------------------------------------------------------
+
+mi_decl_nodiscard void* mi_heap_malloc_expandable(mi_heap_t* heap, size_t size, size_t max_expand_size) mi_attr_noexcept;
+mi_decl_nodiscard void* mi_heap_zalloc_expandable(mi_heap_t* heap, size_t size, size_t max_expand_size) mi_attr_noexcept;
+mi_decl_nodiscard void* mi_malloc_expandable(size_t size, size_t max_expand_size) mi_attr_noexcept;
+mi_decl_nodiscard void* mi_zalloc_expandable(size_t size, size_t max_expand_size) mi_attr_noexcept;
+
+
+// ------------------------------------------------------
 // Analysis
 // ------------------------------------------------------
 
@@ -345,6 +371,7 @@ typedef enum mi_option_e {
   mi_option_arena_reserve,            // initial memory size in KiB for arena reservation (1GiB on 64-bit)
   mi_option_arena_purge_mult,         
   mi_option_purge_extend_delay,
+  mi_option_remap_threshold,          // size in KiB after which realloc uses OS in-place remap; use 0 to disable
   _mi_option_last,
   // legacy option names
   mi_option_large_os_pages = mi_option_allow_large_os_pages,

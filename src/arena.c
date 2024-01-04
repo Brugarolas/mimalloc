@@ -175,11 +175,17 @@ static void* mi_arena_meta_zalloc(size_t size, mi_memid_t* memid, mi_stats_t* st
   *memid = _mi_memid_none();
 
   // try static
-  void* p = mi_arena_static_zalloc(size, MI_ALIGNMENT_MAX, memid);
+  void* p = mi_arena_static_zalloc(size, MI_MAX_ALIGN_SIZE, memid);
   if (p != NULL) return p;
 
   // or fall back to the OS
-  return _mi_os_alloc(size, memid, stats);
+  p = _mi_os_alloc(size, memid, stats);
+  if (p == NULL) return NULL;
+
+  if (!memid->initially_zero) {
+    _mi_memzero_aligned(p, size);
+  }
+  return p;
 }
 
 static void mi_arena_meta_free(void* p, mi_memid_t memid, size_t size, mi_stats_t* stats) {
@@ -815,7 +821,7 @@ int mi_reserve_os_memory_ex(size_t size, bool commit, bool allow_large, bool exc
   const bool is_large = memid.is_pinned; // todo: use separate is_large field?
   if (!mi_manage_os_memory_ex2(start, size, is_large, -1 /* numa node */, exclusive, memid, arena_id)) {
     _mi_os_free_ex(start, size, commit, memid, &_mi_stats_main);
-    _mi_verbose_message("failed to reserve %zu k memory\n", _mi_divide_up(size, 1024));
+    _mi_verbose_message("failed to reserve %zu KiB memory\n", _mi_divide_up(size, 1024));
     return ENOMEM;
   }
   _mi_verbose_message("reserved %zu KiB memory%s\n", _mi_divide_up(size, 1024), is_large ? " (in large os pages)" : "");
